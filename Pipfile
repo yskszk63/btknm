@@ -1,0 +1,22 @@
+[[source]]
+
+url = "https://pypi.python.org/simple"
+verify_ssl = true
+name = "pypi"
+
+
+[[source]]
+
+url = "https://www.piwheels.hostedpi.com/simple"
+verify_ssl = true
+name = "piwheels"
+
+
+[packages]
+
+evdev = "*"
+dbus-python = "*"
+
+
+[dev-packages]
+
