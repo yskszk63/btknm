@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 import asyncio
 import struct
 from functools import reduce
@@ -195,10 +196,16 @@ keytable = {
 }
 
 class InputState(object):
+    kb_report = struct.Struct('BBBBBBBBBB')
+    mouse_report = struct.Struct('BBBBBB')
+    threshold = 0.008 # 125Hz
+
     def __init__(self):
         self.mods = set()
         self.keys = set()
         self.buttons = set()
+        self.mouse_pos = [0, 0, 0]
+        self.last_mouse_send = 0.0
 
     async def handle_events(self, device, callback):
         async for event in device.async_read_loop():
@@ -210,7 +217,6 @@ class InputState(object):
                     self.handle_button_event(event, callback)
 
             elif event.type == evdev.ecodes.EV_REL:
-                event = evdev.events.RelEvent(event)
                 self.handle_rel_event(event, callback)
 
             else:
@@ -243,21 +249,27 @@ class InputState(object):
         callback(self.to_mouse_report(0, 0, 0))
 
     def handle_rel_event(self, event, callback):
-        code = evdev.ecodes.REL[event.event.code]
+        code = event.code
+        val = event.value
 
-        buttons = reduce(lambda v, e: v | mouse_button_table.get(e, 0), self.buttons, 0)
-        val = event.event.value
-        if code == 'REL_X':
-            callback(self.to_mouse_report(val, 0, 0))
-        elif code == 'REL_Y':
-            callback(self.to_mouse_report(0, val, 0))
-        elif code == 'REL_WHEEL':
-            callback(self.to_mouse_report(0, 0, val))
+        if code == evdev.ecodes.REL_X:
+            self.mouse_pos[0] += val
+        elif code == evdev.ecodes.REL_Y:
+            self.mouse_pos[1] += val
+        elif code == evdev.ecodes.REL_WHEEL:
+            self.mouse_pos[2] += val
+
+        now = time.time()
+        if self.last_mouse_send + self.threshold < now:
+            (x, y, z) = self.mouse_pos
+            callback(self.to_mouse_report(x, y, z))
+            self.mouse_pos = [0, 0, 0]
+            self.last_mouse_send = now
 
     def to_keyboard_report(self):
         mod = reduce(lambda v, e: v | mod_table.get(e, 0), self.mods, 0)
         keys = (list(keytable[x] for x in self.keys) + ([0x00] * 6))[:6]
-        return struct.pack('BBBBBBBBBB',
+        return self.kb_report.pack(
                 0xA1,
                 0x01,
                 mod,
@@ -267,7 +279,7 @@ class InputState(object):
     def to_mouse_report(self, x, y, z):
         buttons = reduce(lambda v, e: v | mouse_button_table.get(e, 0), self.buttons, 0)
         data = (buttons, x & 0xFF, y & 0xFF, z & 0xFF)
-        return struct.pack('BBBBBB',
+        return self.mouse_report.pack(
                 0xA1,
                 0x02,
                 *data)
@@ -313,6 +325,7 @@ async def listen(*, loop):
     while True:
         (ccontrol, _) = await loop.sock_accept(scontrol)
         (cinterrupt, _) = await loop.sock_accept(sinterrupt)
+
         yield (ccontrol, cinterrupt)
 
 
