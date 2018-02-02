@@ -5,6 +5,7 @@ import sys
 import time
 import asyncio
 import struct
+from concurrent.futures import FIRST_COMPLETED
 from functools import reduce
 from socket import socket, AF_BLUETOOTH, BTPROTO_L2CAP, SOCK_SEQPACKET, \
         BDADDR_ANY
@@ -212,33 +213,33 @@ class InputState(object):
             if event.type == evdev.ecodes.EV_KEY:
                 event = evdev.events.KeyEvent(event)
                 if event.event.code not in mouse_button_table:
-                    self.handle_key_event(event, callback)
+                    await self.handle_key_event(event, callback)
                 else:
-                    self.handle_button_event(event, callback)
+                    await self.handle_button_event(event, callback)
 
             elif event.type == evdev.ecodes.EV_REL:
-                self.handle_rel_event(event, callback)
+                await self.handle_rel_event(event, callback)
 
             else:
                 #print(event.type, event.value, evdev.categorize(event))
                 pass
 
-    def handle_key_event(self, event, callback):
+    async def handle_key_event(self, event, callback):
         if event.keystate == event.key_down:
             if event.keycode in mod_table:
                 self.mods.add(event.keycode)
             else:
                 self.keys.add(event.keycode)
-            callback(self.to_keyboard_report())
+            await callback(self.to_keyboard_report())
 
         elif event.keystate == event.key_up:
             if event.keycode in mod_table:
                 self.mods.remove(event.keycode)
             else:
                 self.keys.remove(event.keycode)
-            callback(self.to_keyboard_report())
+            await callback(self.to_keyboard_report())
 
-    def handle_button_event(self, event, callback):
+    async def handle_button_event(self, event, callback):
         code = event.event.code
         if event.keystate == event.key_down:
             self.buttons.add(code)
@@ -246,9 +247,9 @@ class InputState(object):
         elif event.keystate == event.key_up:
             self.buttons.remove(code)
 
-        callback(self.to_mouse_report(0, 0, 0))
+        await callback(self.to_mouse_report(0, 0, 0))
 
-    def handle_rel_event(self, event, callback):
+    async def handle_rel_event(self, event, callback):
         code = event.code
         val = event.value
 
@@ -262,7 +263,7 @@ class InputState(object):
         now = time.time()
         if self.last_mouse_send + self.threshold < now:
             (x, y, z) = self.mouse_pos
-            callback(self.to_mouse_report(x, y, z))
+            await callback(self.to_mouse_report(x, y, z))
             self.mouse_pos = [0, 0, 0]
             self.last_mouse_send = now
 
@@ -329,21 +330,6 @@ async def listen(*, loop):
         yield (ccontrol, cinterrupt)
 
 
-async def send_input(csock, isock, queues, *, loop):
-    queue = asyncio.Queue(loop=loop)
-    queues.add(queue)
-    try:
-        while True:
-            data = await queue.get()
-            try:
-                await loop.sock_sendall(isock, data)
-            except ConnectionResetError as e:
-                print(e)
-                break
-    finally:
-        queues.remove(queue)
-
-
 async def read_sock(sock, *, loop):
     while True:
         data = await loop.sock_recv(sock, 16)
@@ -352,37 +338,39 @@ async def read_sock(sock, *, loop):
         print(" ".join(f"{x:02x}" for x in data))
 
 
-async def handle_client(csock, isock, queues, *, loop):
+async def handle_client(csock, isock, callbacks, *, loop):
     with csock:
         with isock:
-            input_future = asyncio.ensure_future(
-                    send_input(csock, isock, queues, loop=loop),
-                    loop=loop)
-            c_read = asyncio.ensure_future(
-                    read_sock(csock, loop=loop),
-                    loop=loop)
-            i_read = asyncio.ensure_future(
-                    read_sock(isock, loop=loop),
-                    loop=loop)
-            def done(_):
-                input_future.cancel()
-                c_read.cancel()
-                i_read.cancel()
-            input_future.add_done_callback(done)
-            c_read.add_done_callback(done)
-            i_read.add_done_callback(done)
+            async def callback(data):
+                try:
+                    await loop.sock_sendall(isock, data)
+                except ConnectionResetError as e:
+                    print(e)
 
-            await asyncio.gather(input_future, c_read, i_read, loop=loop)
+            callbacks.add(callback)
+            try:
+                (_, pending) = await asyncio.wait(
+                        (
+                            read_sock(csock, loop=loop),
+                            read_sock(isock, loop=loop),
+                        ),
+                        loop=loop,
+                        return_when=FIRST_COMPLETED)
+                for f in pending:
+                    f.cancel()
+
+            finally:
+                callbacks.remove(callback)
 
 
 async def run(sources, *, loop):
     setup_profile()
 
-    queues = set()
-    def callback(data):
+    callbacks = set()
+    async def callback(data):
         #print(" ".join(f"{x:02x}" for x in data))
-        for queue in queues:
-            queue.put_nowait(data)
+        for callback in callbacks:
+            await callback(data)
 
     state = InputState()
     for source in sources:
@@ -391,7 +379,7 @@ async def run(sources, *, loop):
 
     async for (ccontrol, cinterrupt) in listen(loop=loop):
         asyncio.ensure_future(
-                handle_client(ccontrol, cinterrupt, queues, loop=loop),
+                handle_client(ccontrol, cinterrupt, callbacks, loop=loop),
                 loop=loop)
 
 
@@ -406,7 +394,6 @@ def main():
         loop.run_until_complete(run(sources, loop=loop))
     except KeyboardInterrupt:
         pass
-    loop.close()
 
 
 if __name__ == '__main__':
