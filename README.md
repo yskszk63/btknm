@@ -32,6 +32,7 @@ $ cat /etc/systemd/system/bluetooth.service.d/override.conf
 [Service]
 ExecStart=
 ExecStart=/usr/lib/bluetooth/bluetoothd -p time
+ExecStartPost=/usr/bin/btmgmt power on
 $ sudo systemctl enable --now bluetooth.service
 ```
 
